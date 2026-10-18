@@ -234,12 +234,12 @@ final class PlayerModel: ObservableObject {
     }
 
     func previous() {
-        if currentTime > 3 {
-            seek(to: 0)
-            return
-        }
-        if mode == .shuffle, let previousID = shuffleHistory.popLast(),
-           let track = queue.first(where: { $0.id == previousID }) {
+        if mode == .shuffle {
+            guard let previousID = shuffleHistory.popLast(),
+                  let track = queue.first(where: { $0.id == previousID }) else {
+                seek(to: 0)
+                return
+            }
             if let current {
                 shuffleBag.append(current.id)
             }
