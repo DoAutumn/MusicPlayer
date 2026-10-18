@@ -3,11 +3,13 @@ import SwiftUI
 
 @main
 struct QukuApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var library = LibraryModel()
     @StateObject private var player = PlayerModel()
+    @StateObject private var chrome = AppChrome.shared
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: "main") {
             ContentView()
                 .environmentObject(library)
                 .environmentObject(player)
@@ -28,6 +30,97 @@ struct QukuApp: App {
                     .keyboardShortcut("r")
             }
         }
+
+        MenuBarExtra(isInserted: $chrome.menuBarVisible) {
+            MenuBarContent()
+                .environmentObject(player)
+                .environmentObject(chrome)
+        } label: {
+            Image(nsImage: Self.trayIcon)
+        }
+    }
+
+    /// 18pt 模板图标，@2x/@3x 保持菜单栏清晰。
+    private static let trayIcon: NSImage = {
+        let pointSize = NSSize(width: 18, height: 18)
+        let image = NSImage(size: pointSize)
+        let scales: [(CGFloat, String)] = [
+            (1, "TrayIconTemplate"),
+            (2, "TrayIconTemplate@2x"),
+            (3, "TrayIconTemplate@3x")
+        ]
+        var loadedAny = false
+        for (_, name) in scales {
+            guard let url = Bundle.main.url(forResource: name, withExtension: "png"),
+                  let data = try? Data(contentsOf: url),
+                  let rep = NSBitmapImageRep(data: data) else { continue }
+            rep.size = pointSize
+            image.addRepresentation(rep)
+            loadedAny = true
+        }
+        if !loadedAny {
+            let fallback = NSImage(systemSymbolName: "music.note", accessibilityDescription: "MusicPlayer") ?? NSImage()
+            fallback.isTemplate = true
+            fallback.size = pointSize
+            return fallback
+        }
+        image.isTemplate = true
+        image.size = pointSize
+        return image
+    }()
+}
+
+@MainActor
+final class AppChrome: ObservableObject {
+    static let shared = AppChrome()
+    @Published var menuBarVisible = false
+
+    func hideDock() {
+        menuBarVisible = true
+        NSApp.setActivationPolicy(.accessory)
+    }
+
+    func prepareWindow() {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func windowDidOpen() {
+        menuBarVisible = false
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        Task { @MainActor in
+            AppChrome.shared.hideDock()
+        }
+        return false
+    }
+}
+
+private struct MenuBarContent: View {
+    @Environment(\.openWindow) private var openWindow
+    @EnvironmentObject private var player: PlayerModel
+    @EnvironmentObject private var chrome: AppChrome
+
+    var body: some View {
+        Button("打开 MusicPlayer") {
+            chrome.prepareWindow()
+            openWindow(id: "main")
+            DispatchQueue.main.async {
+                chrome.windowDidOpen()
+            }
+        }
+        Divider()
+        Button(player.isPlaying ? "暂停" : "播放") {
+            player.toggleCurrent()
+        }
+        Button("下一首") { player.next() }
+        Button("上一首") { player.previous() }
+        Divider()
+        Button("退出 MusicPlayer") { NSApp.terminate(nil) }
+            .keyboardShortcut("q")
     }
 }
 

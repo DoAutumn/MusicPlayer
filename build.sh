@@ -22,5 +22,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp build/MusicPlayer "$APP/Contents/MacOS/MusicPlayer"
 cp Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+cp Resources/TrayIconTemplate.png \
+   Resources/TrayIconTemplate@2x.png \
+   Resources/TrayIconTemplate@3x.png \
+   "$APP/Contents/Resources/"
 codesign --force --sign - "$APP" >/dev/null
 echo "$APP"
