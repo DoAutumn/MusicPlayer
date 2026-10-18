@@ -34,8 +34,12 @@ enum PlayMode: String {
 
 @MainActor
 final class PlayerModel: ObservableObject {
-    @Published var current: Track?
-    @Published var isPlaying = false
+    @Published var current: Track? {
+        didSet { publishNowPlaying() }
+    }
+    @Published var isPlaying = false {
+        didSet { publishNowPlaying() }
+    }
     @Published var currentTime: Double = 0
     @Published var duration: Double = 0
     @Published var volume: Double
@@ -78,9 +82,11 @@ final class PlayerModel: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
+                self?.isPlaying = false
                 self?.remember(force: true)
             }
         }
+        publishNowPlaying()
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.4, preferredTimescale: 600),
             queue: .main
@@ -389,6 +395,10 @@ final class PlayerModel: ObservableObject {
             player.play()
             isPlaying = true
         }
+    }
+
+    private func publishNowPlaying() {
+        NowPlayingBridge.publish(title: current?.title, playing: isPlaying)
     }
 
     private func remember(force: Bool) {
