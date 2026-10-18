@@ -27,6 +27,7 @@ struct ContentView: View {
         .focusEffectDisabled()
         .onChange(of: library.tracks) { _, tracks in
             player.sync(with: tracks)
+            player.restore(in: tracks)
             player.updateQueue(filtered)
         }
         .onChange(of: query) { _, _ in
@@ -90,6 +91,7 @@ struct ContentView: View {
         } else if filtered.isEmpty {
             status(symbol: "magnifyingglass", title: "没有匹配的歌曲", detail: "换个关键词试试。")
         } else {
+            ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 1) {
                     ForEach(filtered) { track in
@@ -99,6 +101,7 @@ struct ContentView: View {
                             isPlaying: player.current?.id == track.id && player.isPlaying,
                             isSelected: selection == track.id
                         )
+                        .id(track.id)
                         .onTapGesture(count: 2) {
                             selection = track.id
                             player.play(track, queue: filtered)
@@ -116,6 +119,12 @@ struct ContentView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
+            }
+            .onAppear {
+                guard let id = player.current?.id else { return }
+                if selection == nil { selection = id }
+                proxy.scrollTo(id, anchor: .center)
+            }
             }
         }
     }

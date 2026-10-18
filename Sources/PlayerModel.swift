@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import Foundation
 
@@ -46,17 +47,40 @@ final class PlayerModel: ObservableObject {
     private var queue: [Track] = []
     private var index = 0
     private var shuffleHistory: [Track.ID] = []
+    private var shuffleBag: [Track.ID] = []
     private var scrubbing = false
+    private var seeking = false
+    private var pendingSeek: Double?
+    private var playWhenReady = false
+    private var didRestore = false
+    private var savedPath: String?
+    private var savedTime: Double = 0
+    private var lastRememberedTime = -1.0
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
     private var statusObserver: NSKeyValueObservation?
     private var rateObserver: NSKeyValueObservation?
+    private var terminateObserver: NSObjectProtocol?
+
+    private static let trackKey = "currentTrackPath"
+    private static let timeKey = "currentTime"
 
     init() {
         let saved = UserDefaults.standard.object(forKey: "volume") as? Double ?? 0.9
         volume = min(max(saved, 0), 1)
         mode = PlayMode(rawValue: UserDefaults.standard.string(forKey: "playMode") ?? "") ?? .sequential
+        savedPath = UserDefaults.standard.string(forKey: Self.trackKey)
+        savedTime = UserDefaults.standard.object(forKey: Self.timeKey) as? Double ?? 0
         player.volume = Float(volume)
+        terminateObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.remember(force: true)
+            }
+        }
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.4, preferredTimescale: 600),
             queue: .main
@@ -86,17 +110,32 @@ final class PlayerModel: ObservableObject {
         mode = mode.next
         if mode != .shuffle {
             shuffleHistory.removeAll()
+            shuffleBag.removeAll()
         }
         UserDefaults.standard.set(mode.rawValue, forKey: "playMode")
     }
 
     func updateQueue(_ tracks: [Track]) {
         queue = tracks
+        let ids = Set(tracks.map(\.id))
+        shuffleBag.removeAll { !ids.contains($0) }
         if let current, let found = tracks.firstIndex(where: { $0.id == current.id }) {
             index = found
         } else {
             index = -1
         }
+    }
+
+    /// 曲库读完后，把上次的歌和进度装回来，先不自动播放。
+    func restore(in tracks: [Track]) {
+        guard current == nil, !didRestore, let path = savedPath, !tracks.isEmpty else { return }
+        didRestore = true
+        guard let track = tracks.first(where: { $0.id == path }) else {
+            UserDefaults.standard.removeObject(forKey: Self.trackKey)
+            UserDefaults.standard.removeObject(forKey: Self.timeKey)
+            return
+        }
+        load(track, queue: tracks, time: savedTime, autoplay: false)
     }
 
     func sync(with tracks: [Track]) {
@@ -108,12 +147,19 @@ final class PlayerModel: ObservableObject {
     }
 
     func play(_ track: Track, queue tracks: [Track]) {
+        load(track, queue: tracks, time: 0, autoplay: true)
+    }
+
+    private func load(_ track: Track, queue tracks: [Track], time: Double, autoplay: Bool) {
         queue = tracks
         index = tracks.firstIndex(where: { $0.id == track.id }) ?? 0
         current = track
-        currentTime = 0
+        currentTime = max(time, 0)
         duration = 0
         playbackError = nil
+        pendingSeek = time > 0.3 ? time : nil
+        playWhenReady = autoplay && pendingSeek != nil
+        shuffleBag.removeAll { $0 == track.id }
         let item = AVPlayerItem(url: track.url)
         statusObserver = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             let status = item.status
@@ -136,8 +182,14 @@ final class PlayerModel: ObservableObject {
             }
         }
         player.replaceCurrentItem(with: item)
-        player.play()
-        isPlaying = true
+        if autoplay, pendingSeek == nil {
+            player.play()
+            isPlaying = true
+        } else {
+            player.pause()
+            isPlaying = false
+        }
+        remember(force: true)
     }
 
     func toggle(selected: Track?, queue tracks: [Track]) {
@@ -172,6 +224,7 @@ final class PlayerModel: ObservableObject {
         if isPlaying {
             player.pause()
             isPlaying = false
+            remember(force: true)
         } else {
             if duration > 0, currentTime >= duration - 0.4 {
                 seek(to: 0)
@@ -196,6 +249,9 @@ final class PlayerModel: ObservableObject {
         }
         if mode == .shuffle, let previousID = shuffleHistory.popLast(),
            let track = queue.first(where: { $0.id == previousID }) {
+            if let current {
+                shuffleBag.append(current.id)
+            }
             play(track, queue: queue)
             return
         }
@@ -239,13 +295,28 @@ final class PlayerModel: ObservableObject {
                 shuffleHistory.removeFirst(shuffleHistory.count - 200)
             }
         }
-        var nextIndex = Int.random(in: 0..<queue.count)
-        var tries = 0
-        while nextIndex == index, tries < 6 {
-            nextIndex = Int.random(in: 0..<queue.count)
-            tries += 1
+        guard let track = nextShuffledTrack() else { return }
+        play(track, queue: queue)
+    }
+
+    /// 先洗好一整轮，按顺序取用。这一轮没放完之前不会再抽到已经放过的歌。
+    private func nextShuffledTrack() -> Track? {
+        for _ in 0..<2 {
+            if shuffleBag.isEmpty {
+                var ids = queue.map(\.id)
+                if let current {
+                    ids.removeAll { $0 == current.id }
+                }
+                ids.shuffle()
+                shuffleBag = ids
+            }
+            while let id = shuffleBag.popLast() {
+                if let track = queue.first(where: { $0.id == id }) {
+                    return track
+                }
+            }
         }
-        play(queue[nextIndex], queue: queue)
+        return nil
     }
 
     private func replayCurrent() {
@@ -263,11 +334,22 @@ final class PlayerModel: ObservableObject {
         scrubbing = true
     }
 
-    func seek(to time: Double) {
+    func seek(to time: Double, resume: Bool = false) {
+        seeking = true
         let target = max(time, 0)
         currentTime = target
         let cm = CMTime(seconds: target, preferredTimescale: 600)
-        player.seek(to: cm, toleranceBefore: .zero, toleranceAfter: .zero)
+        player.seek(to: cm, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.seeking = false
+                if resume {
+                    self.player.play()
+                    self.isPlaying = true
+                }
+                self.remember(force: true)
+            }
+        }
     }
 
     func endScrub(at time: Double) {
@@ -276,21 +358,45 @@ final class PlayerModel: ObservableObject {
     }
 
     private func note(time: Double) {
-        guard !scrubbing, time.isFinite else { return }
+        guard !scrubbing, !seeking, pendingSeek == nil, time.isFinite else { return }
         currentTime = max(time, 0)
         if let length = player.currentItem?.duration.seconds, length.isFinite, length > 0 {
             duration = length
         }
+        remember(force: false)
     }
 
     private func apply(status: AVPlayerItem.Status, message: String?, length: Double) {
         if status == .failed {
             playbackError = message ?? "这首歌无法播放"
             isPlaying = false
+            pendingSeek = nil
+            playWhenReady = false
+            return
         }
         if length.isFinite, length > 0 {
             duration = length
         }
+        guard status == .readyToPlay else { return }
+        if let pending = pendingSeek {
+            pendingSeek = nil
+            seek(to: pending, resume: playWhenReady)
+            playWhenReady = false
+            return
+        }
+        if playWhenReady {
+            playWhenReady = false
+            player.play()
+            isPlaying = true
+        }
+    }
+
+    private func remember(force: Bool) {
+        guard let path = current?.id else { return }
+        if !force, abs(currentTime - lastRememberedTime) < 2 { return }
+        lastRememberedTime = currentTime
+        UserDefaults.standard.set(path, forKey: Self.trackKey)
+        UserDefaults.standard.set(currentTime, forKey: Self.timeKey)
     }
 }
 
