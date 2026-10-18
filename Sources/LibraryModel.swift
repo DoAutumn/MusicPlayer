@@ -12,14 +12,19 @@ final class LibraryModel: ObservableObject {
     @Published var taggedCount = 0
     @Published var rootPath: String
 
+    private var generation = 0
+
     var rootURL: URL { URL(fileURLWithPath: rootPath) }
 
     init() {
         rootPath = UserDefaults.standard.string(forKey: Self.pathKey) ?? Self.defaultPath
+        reload()
     }
 
     func reload() {
         let root = rootURL
+        generation += 1
+        let token = generation
         isLoading = true
         rootMissing = false
         taggedCount = 0
@@ -27,6 +32,7 @@ final class LibraryModel: ObservableObject {
             let scanned = await Task.detached(priority: .userInitiated) {
                 Self.scan(root)
             }.value
+            guard token == self.generation else { return }
             switch scanned {
             case .missing:
                 tracks = []
@@ -35,7 +41,12 @@ final class LibraryModel: ObservableObject {
             case .tracks(let found):
                 tracks = found
                 isLoading = false
-                await enrich(found)
+                let urls = found
+                    .filter { $0.url.pathExtension.lowercased() == "mp3" }
+                    .map(\.url)
+                let tags = await Self.readTags(urls: urls)
+                guard token == self.generation else { return }
+                apply(tags)
             }
         }
     }
@@ -55,44 +66,39 @@ final class LibraryModel: ObservableObject {
         reload()
     }
 
-    private func enrich(_ items: [Track]) async {
-        let targets = items.filter { $0.url.pathExtension.lowercased() == "mp3" }
-        var cursor = 0
-        var pending: [(String, ID3Reader.Tag)] = []
-
-        func flush() {
-            guard !pending.isEmpty else { return }
-            var byPath = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
-            for (path, tag) in pending {
-                guard var track = byPath[path] else { continue }
-                if let title = tag.title { track.title = title }
-                if let artist = tag.artist { track.artist = artist }
-                if let album = tag.album { track.album = album }
-                byPath[path] = track
-            }
-            tracks = tracks.map { byPath[$0.id] ?? $0 }
-            taggedCount += pending.count
-            pending.removeAll(keepingCapacity: true)
+    private func apply(_ tags: [(String, ID3Reader.Tag)]) {
+        guard !tags.isEmpty else { return }
+        var byPath = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
+        for (path, tag) in tags {
+            guard var track = byPath[path] else { continue }
+            if let title = tag.title { track.title = title }
+            if let artist = tag.artist { track.artist = artist }
+            if let album = tag.album { track.album = album }
+            byPath[path] = track
         }
+        tracks = tracks.map { byPath[$0.id] ?? $0 }
+        taggedCount += tags.count
+    }
 
+    /// 在协作线程池里读标签。不能从主界面任务组里读，否则会占住主线程，列表一直停在「正在读取」。
+    private nonisolated static func readTags(urls: [URL]) async -> [(String, ID3Reader.Tag)] {
         await withTaskGroup(of: (String, ID3Reader.Tag)?.self) { group in
+            var pending = urls.makeIterator()
+            var result: [(String, ID3Reader.Tag)] = []
             func enqueue() {
-                guard cursor < targets.count else { return }
-                let url = targets[cursor].url
-                cursor += 1
+                guard let url = pending.next() else { return }
                 group.addTask {
                     guard let tag = ID3Reader.read(url: url) else { return nil }
                     return (url.path, tag)
                 }
             }
-            for _ in 0..<4 { enqueue() }
+            for _ in 0..<8 { enqueue() }
             for await item in group {
-                if let item { pending.append(item) }
-                if pending.count >= 40 { flush() }
+                if let item { result.append(item) }
                 enqueue()
             }
+            return result
         }
-        flush()
     }
 
     private nonisolated static func scan(_ root: URL) -> ScanResult {

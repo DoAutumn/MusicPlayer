@@ -25,7 +25,6 @@ struct ContentView: View {
         .frame(minWidth: 780, minHeight: 560)
         .background(Color(nsColor: .windowBackgroundColor))
         .focusEffectDisabled()
-        .onAppear { library.reload() }
         .onChange(of: library.tracks) { _, tracks in
             player.sync(with: tracks)
             player.updateQueue(filtered)

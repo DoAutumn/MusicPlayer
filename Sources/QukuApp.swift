@@ -31,7 +31,7 @@ struct QukuApp: App {
             }
         }
 
-        MenuBarExtra(isInserted: $chrome.menuBarVisible) {
+        MenuBarExtra {
             MenuBarContent()
                 .environmentObject(player)
                 .environmentObject(chrome)
@@ -73,20 +73,14 @@ struct QukuApp: App {
 @MainActor
 final class AppChrome: ObservableObject {
     static let shared = AppChrome()
-    @Published var menuBarVisible = false
 
     func hideDock() {
-        menuBarVisible = true
         NSApp.setActivationPolicy(.accessory)
     }
 
     func prepareWindow() {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-    }
-
-    func windowDidOpen() {
-        menuBarVisible = false
     }
 }
 
@@ -107,9 +101,10 @@ private struct MenuBarContent: View {
     var body: some View {
         Button("打开 MusicPlayer") {
             chrome.prepareWindow()
-            openWindow(id: "main")
-            DispatchQueue.main.async {
-                chrome.windowDidOpen()
+            if let window = NSApp.windows.first(where: { $0.canBecomeMain }) {
+                window.makeKeyAndOrderFront(nil)
+            } else {
+                openWindow(id: "main")
             }
         }
         Divider()

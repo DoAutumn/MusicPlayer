@@ -102,7 +102,9 @@ private struct QuietTextField: NSViewRepresentable {
 /// 单行文本视图。输入法的标记文本由它自己保存，不经过 NSTextField 的字段编辑器。
 final class LineSearchTextView: NSTextView {
     var placeholder = "" {
-        didSet { needsDisplay = true }
+        didSet {
+            if oldValue != placeholder { needsDisplay = true }
+        }
     }
 
     override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {
