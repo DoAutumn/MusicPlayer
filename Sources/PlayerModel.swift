@@ -45,7 +45,6 @@ final class PlayerModel: ObservableObject {
     @Published var volume: Double
     @Published var mode: PlayMode
     @Published var playbackError: String?
-    @Published var selectedID: Track.ID?
 
     private let player = AVPlayer()
     private var queue: [Track] = []
@@ -198,32 +197,18 @@ final class PlayerModel: ObservableObject {
         remember(force: true)
     }
 
-    func toggle(selected: Track?, queue tracks: [Track]) {
-        if let selected, current?.id != selected.id {
-            play(selected, queue: tracks)
+    /// 主窗口和菜单栏共用。正在播放时只暂停，不换歌。还没有当前歌曲时，从列表第一首开始。
+    func togglePlayback(queue tracks: [Track]? = nil) {
+        if let tracks {
+            updateQueue(tracks)
+        }
+        if current != nil {
+            resumeOrPause()
             return
         }
-        if current == nil {
-            if let first = tracks.first {
-                play(first, queue: tracks)
-            }
-            return
-        }
-        resumeOrPause()
-    }
-
-    func toggleCurrent() {
-        if let selectedID, current?.id != selectedID,
-           let selected = queue.first(where: { $0.id == selectedID }) {
-            play(selected, queue: queue)
-            return
-        }
-        if current == nil {
-            guard let first = queue.first else { return }
-            play(first, queue: queue)
-            return
-        }
-        resumeOrPause()
+        let list = tracks ?? queue
+        guard let first = list.first else { return }
+        play(first, queue: list)
     }
 
     private func resumeOrPause() {

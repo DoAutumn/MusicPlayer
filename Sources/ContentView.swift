@@ -11,11 +11,6 @@ struct ContentView: View {
         library.tracks.filter { $0.matches(query) }
     }
 
-    private var selectedTrack: Track? {
-        guard let selection else { return nil }
-        return filtered.first { $0.id == selection }
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -32,9 +27,6 @@ struct ContentView: View {
         }
         .onChange(of: query) { _, _ in
             player.updateQueue(filtered)
-        }
-        .onChange(of: selection) { _, id in
-            player.selectedID = id
         }
     }
 
@@ -242,7 +234,7 @@ struct ContentView: View {
             TransportButton(system: "backward.fill", size: 12) { player.previous() }
                 .disabled(player.current == nil)
             Button {
-                player.toggle(selected: selectedTrack, queue: filtered)
+                player.togglePlayback(queue: filtered)
             } label: {
                 Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
                     .font(.system(size: 13, weight: .semibold))

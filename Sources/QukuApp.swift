@@ -19,7 +19,7 @@ struct QukuApp: App {
         .commands {
             CommandMenu("播放") {
                 Button("播放或暂停") {
-                    player.toggleCurrent()
+                    player.togglePlayback()
                 }
                 Button("下一首") { player.next() }
                     .keyboardShortcut(.rightArrow, modifiers: [.command])
@@ -109,7 +109,7 @@ private struct MenuBarContent: View {
         }
         Divider()
         Button(player.isPlaying ? "暂停" : "播放") {
-            player.toggleCurrent()
+            player.togglePlayback()
         }
         Button("下一首") { player.next() }
         Button("上一首") { player.previous() }
@@ -159,7 +159,7 @@ private struct SpaceMonitorHost: NSViewRepresentable {
         context.coordinator.keyView = view
         view.onSpace = {
             Task { @MainActor in
-                player.toggleCurrent()
+                player.togglePlayback()
             }
         }
     }
