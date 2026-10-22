@@ -64,9 +64,19 @@ final class PlayerModel: ObservableObject {
     private var statusObserver: NSKeyValueObservation?
     private var rateObserver: NSKeyValueObservation?
     private var terminateObserver: NSObjectProtocol?
+    private var fadeTimer: Timer?
+    private var fadeFrom = 0.0
+    private var fadeTo = 0.0
+    private var fadeDuration = 0.0
+    private var fadeStartedAt: Date?
+    private var fadeCompletion: (() -> Void)?
+    /// 淡入淡出进行中时，忽略 AVPlayer.rate 对 isPlaying 的回写。
+    private var isFading = false
 
     private static let trackKey = "currentTrackPath"
     private static let timeKey = "currentTime"
+    private static let fadeOutDuration: Double = 2.0
+    private static let fadeInDuration: Double = 4.0
 
     init() {
         let saved = UserDefaults.standard.object(forKey: "volume") as? Double ?? 0.9
@@ -99,7 +109,8 @@ final class PlayerModel: ObservableObject {
         rateObserver = player.observe(\.rate, options: [.new]) { [weak self] player, _ in
             let playing = player.rate > 0.05
             Task { @MainActor in
-                self?.isPlaying = playing
+                guard let self, !self.isFading else { return }
+                self.isPlaying = playing
             }
         }
     }
@@ -107,8 +118,11 @@ final class PlayerModel: ObservableObject {
     func setVolume(_ value: Double) {
         let clamped = min(max(value, 0), 1)
         volume = clamped
-        player.volume = Float(clamped)
         UserDefaults.standard.set(clamped, forKey: "volume")
+        // 淡入淡出过程中不改真实输出；暂停后 player 音量为 0，等下次淡入再跟上。
+        if !isFading, isPlaying {
+            player.volume = Float(clamped)
+        }
     }
 
     func cycleMode() {
@@ -156,6 +170,7 @@ final class PlayerModel: ObservableObject {
     }
 
     private func load(_ track: Track, queue tracks: [Track], time: Double, autoplay: Bool) {
+        cancelFade()
         queue = tracks
         index = tracks.firstIndex(where: { $0.id == track.id }) ?? 0
         current = track
@@ -165,6 +180,7 @@ final class PlayerModel: ObservableObject {
         pendingSeek = time > 0.3 ? time : nil
         playWhenReady = autoplay && pendingSeek != nil
         shuffleBag.removeAll { $0 == track.id }
+        player.volume = Float(volume)
         let item = AVPlayerItem(url: track.url)
         statusObserver = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             let status = item.status
@@ -188,11 +204,12 @@ final class PlayerModel: ObservableObject {
         }
         player.replaceCurrentItem(with: item)
         if autoplay, pendingSeek == nil {
-            player.play()
-            isPlaying = true
+            beginPlaybackWithFade()
         } else {
+            // 暂停态保持输出为 0，避免首次淡入误用满音量当起点。
             player.pause()
             isPlaying = false
+            player.volume = 0
         }
         remember(force: true)
     }
@@ -213,15 +230,104 @@ final class PlayerModel: ObservableObject {
 
     private func resumeOrPause() {
         if isPlaying {
-            player.pause()
-            isPlaying = false
-            remember(force: true)
+            fadePause()
         } else {
-            if duration > 0, currentTime >= duration - 0.4 {
-                seek(to: 0)
-            }
+            fadeResume()
+        }
+    }
+
+    private func cancelFade() {
+        fadeTimer?.invalidate()
+        fadeTimer = nil
+        fadeStartedAt = nil
+        fadeCompletion = nil
+        isFading = false
+    }
+
+    private func fadePause() {
+        let start = max(Double(player.volume), 0)
+        isPlaying = false
+        remember(force: true)
+        rampVolume(from: start, to: 0, duration: Self.fadeOutDuration) { [weak self] in
+            guard let self else { return }
+            self.player.pause()
+            self.player.volume = 0
+        }
+    }
+
+    private func fadeResume() {
+        if duration > 0, currentTime >= duration - 0.4 {
+            seek(to: 0)
+        }
+        let target = max(volume, 0)
+        // 已暂停时必须从 0 淡入。load/restore 后 player.volume 可能仍是设定音量，
+        // 若拿它当起点会变成「满音量 → 满音量」，第一次播放就没有淡入。
+        let start: Double
+        if player.rate < 0.05 {
+            start = 0
+            player.volume = 0
             player.play()
-            isPlaying = true
+        } else {
+            start = max(Double(player.volume), 0)
+        }
+        isPlaying = true
+        rampVolume(from: start, to: target, duration: Self.fadeInDuration) { [weak self] in
+            guard let self else { return }
+            self.player.volume = Float(self.volume)
+        }
+    }
+
+    /// 墙钟 Timer + 振幅线性插值。
+    private func rampVolume(
+        from: Double,
+        to: Double,
+        duration: Double,
+        completion: (() -> Void)? = nil
+    ) {
+        cancelFade()
+        isFading = true
+        fadeFrom = from
+        fadeTo = to
+        fadeDuration = max(duration, 0.01)
+        fadeStartedAt = Date()
+        fadeCompletion = completion
+        player.volume = Float(from)
+
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] timer in
+            guard let self else {
+                timer.invalidate()
+                return
+            }
+            Task { @MainActor in
+                self.handleFadeTick(timer)
+            }
+        }
+        fadeTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func handleFadeTick(_ timer: Timer) {
+        guard isFading, let startedAt = fadeStartedAt, fadeTimer === timer else { return }
+        let t = min(Date().timeIntervalSince(startedAt) / fadeDuration, 1)
+        player.volume = Float(fadeFrom + (fadeTo - fadeFrom) * t)
+        guard t >= 1 else { return }
+
+        let done = fadeCompletion
+        fadeTimer?.invalidate()
+        fadeTimer = nil
+        fadeStartedAt = nil
+        fadeCompletion = nil
+        isFading = false
+        player.volume = Float(fadeTo)
+        done?()
+    }
+
+    private func beginPlaybackWithFade() {
+        player.volume = 0
+        player.play()
+        isPlaying = true
+        rampVolume(from: 0, to: volume, duration: Self.fadeInDuration) { [weak self] in
+            self?.player.volume = Float(self?.volume ?? 0)
         }
     }
 
@@ -315,8 +421,7 @@ final class PlayerModel: ObservableObject {
         let startTime = CMTime(seconds: 0, preferredTimescale: 600)
         player.seek(to: startTime, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
             Task { @MainActor in
-                self?.player.play()
-                self?.isPlaying = true
+                self?.beginPlaybackWithFade()
             }
         }
     }
@@ -335,8 +440,7 @@ final class PlayerModel: ObservableObject {
                 guard let self else { return }
                 self.seeking = false
                 if resume {
-                    self.player.play()
-                    self.isPlaying = true
+                    self.beginPlaybackWithFade()
                 }
                 self.remember(force: true)
             }
@@ -377,8 +481,7 @@ final class PlayerModel: ObservableObject {
         }
         if playWhenReady {
             playWhenReady = false
-            player.play()
-            isPlaying = true
+            beginPlaybackWithFade()
         }
     }
 
